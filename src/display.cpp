@@ -33,6 +33,12 @@ extern char filename[];
 extern Preferences preferences;
 extern ApiDisplayResult apiDisplayResult;
 
+// #if defined(BOARD_SEEED_RETERMINAL_E1002)
+// BBEPAPER bbep(EP73_SPECTRA_800x480);
+// #else
+// BBEPAPER bbep(EP75_800x480);
+// #endif
+
 /**
  * @brief Function to init the display
  * @param none
@@ -817,6 +823,7 @@ void display_show_msg(uint8_t *image_buffer, MSG message_type, String friendly_i
     Log_info("Free heap after bbep.allocBuffer() - %d", ESP.getMaxAllocHeap());
 #endif
 
+#if !defined(BOARD_SEEED_RETERMINAL_E1002)    //for E1002 the screen refresh takes long, remove this unnecessary refresh
     if (message_type == WIFI_CONNECT)
     {
         Log_info("Display set to white");
@@ -832,6 +839,7 @@ void display_show_msg(uint8_t *image_buffer, MSG message_type, String friendly_i
 #endif
         display_sleep(1000);
     }
+#endif
 
     auto width = display_width();
     auto height = display_height();

@@ -861,6 +861,12 @@ static https_request_err_e downloadAndShow()
             break;
           }
 
+          if (imagePointer != nullptr) 
+          {
+            free(imagePointer);
+            imagePointer = nullptr;
+          }
+
           if (isPNG && png_res != PNG_NO_ERR)
           {
             filesystem_file_delete("/current.png");
@@ -1283,6 +1289,7 @@ https_request_err_e handleApiDisplayResponse(ApiDisplayResponse &apiResponse)
             }
             break;
             }
+
             switch (bmp_proccess_response)
             {
             case BMP_NO_ERR:
@@ -1300,10 +1307,11 @@ https_request_err_e handleApiDisplayResponse(ApiDisplayResponse &apiResponse)
           }
           else
           {
-            free(buffer);
-            buffer = nullptr;
             showMessageWithLogo(MSG_FORMAT_ERROR);
           }
+          free(buffer);
+          buffer = nullptr;
+
         }
         else
         {

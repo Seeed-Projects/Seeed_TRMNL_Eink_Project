@@ -757,7 +757,6 @@ static https_request_err_e downloadAndShow()
             bmp_res = parseBMPHeader(buffer, image_reverse);
             Log.info("%s [%d]: BMP Parsing result: %d\r\n", __FILE__, __LINE__, bmp_res);
           }
-          Serial.println();
           String error = "";
           uint8_t *imagePointer = buffer;
 //          uint8_t *imagePointer = (decodedPng == nullptr) ? buffer : decodedPng;
@@ -2127,7 +2126,7 @@ static bool checkCurrentFileName(String &newName)
 {
   String currentFilename = preferences.getString(PREFERENCES_FILENAME_KEY, "");
 
-  Log.error("%s [%d]: Current filename: %s\r\n", __FILE__, __LINE__, currentFilename);
+  Log.error("%s [%d]: Current filename: %s\r\n", __FILE__, __LINE__, currentFilename.c_str());
 
   if (currentFilename.equals(newName))
   {

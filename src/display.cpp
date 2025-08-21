@@ -10,8 +10,13 @@
 #include "bb_epaper.h"
 //#define ONE_BIT_PANEL EP426_800x480
 //#define TWO_BIT_PANEL EP426_800x480_4GRAY
+#if defined(BOARD_SEEED_RETERMINAL_E1002)
+#define ONE_BIT_PANEL EP73_SPECTRA_800x480
+#define TWO_BIT_PANEL EP73_SPECTRA_800x480
+#else
 #define ONE_BIT_PANEL EP75_800x480
 #define TWO_BIT_PANEL EP75_800x480_4GRAY_OLD
+#endif
 BBEPAPER bbep(ONE_BIT_PANEL);
 // Counts the number of partial updates to know when to do a full update
 RTC_DATA_ATTR int iUpdateCount = 0;
@@ -32,12 +37,6 @@ FASTEPD bbep;
 extern char filename[];
 extern Preferences preferences;
 extern ApiDisplayResult apiDisplayResult;
-
-// #if defined(BOARD_SEEED_RETERMINAL_E1002)
-// BBEPAPER bbep(EP73_SPECTRA_800x480);
-// #else
-// BBEPAPER bbep(EP75_800x480);
-// #endif
 
 /**
  * @brief Function to init the display
@@ -477,17 +476,144 @@ PNG *png = new PNG();
     free(png); // free the decoder instance
     return rc;
 } /* png_to_epd() */
-/** 
+
 /**
- * @brief Function to render a bitmap, be compatible with the colored ePaper
+ * The following functions are for E1002 only, temporary implementation for its 4bpp panel
+ */
+#if defined(BOARD_SEEED_RETERMINAL_E1002)
+void png_draw_into_4bpp(PNGDRAW *pDraw)
+{
+    int x;
+    uint8_t ucInvert = 0;
+    uint8_t uc, ucMask, src, *s, *d, *pTemp = bbep.getCache(); // get some scratch memory (not from the stack)
+    uint8_t colorMap[4] = {0x01, 0x03, 0x05, 0x0}; // map 4 gray to 4 colors in 4bpp
+    //0 black, 1 white, 2 yellow, 3 red, 5 blue, 6 green
+
+    if (pDraw->pPalette) {
+      if (pDraw->pPalette[0] == 0) {
+        ucInvert = 0xff;
+      }
+    }
+    s = (uint8_t *)pDraw->pPixels;
+    d = pTemp;
+    if (!pDraw->pUser) {
+        // 1-bit output, decode the single plane and write it
+        src = *s++;
+        src ^= ucInvert;
+        uc = 0;
+        for(x = 0; x < pDraw->iWidth; x++) {
+            uc <<= 4;
+            if (src & 0x80) {
+                uc |= 0x0;  // black
+            } else {
+                uc |= 0x1;  // white
+            }
+            src <<= 1;
+            if ((x & 7) == 7) {
+                src = *s++; 
+                src ^= ucInvert;
+            }
+            if ((x & 1) == 1) {
+                *d++ = uc;
+                uc = 0;
+            }
+        }
+    } else { // we need to split the 2-bit data into plane 0 and 1
+        src = *s++;
+        src ^= ucInvert;
+        uc = 0; // suppress warning/error
+        if (*(int *)pDraw->pUser > 1) { // draw 2bpp data as 1-bit to use for partial update
+            ucInvert = ~ucInvert; // the invert rule is backwards for grayscale data
+            src = ~src;
+            for (x=0; x<pDraw->iWidth; x++) {
+                uc <<= 4;
+                if (src & 0xc0) { // non-white -> black
+                    uc |= 0x0;
+                } else {
+                    uc |= 0x1; // white
+                }
+                src <<= 2;
+                if ((x & 3) == 3) { // new input byte
+                    src = *s++;
+                    src ^= ucInvert;
+                }
+                if ((x & 1) == 1) { // new output byte
+                    *d++ = uc;
+                    uc = 0;
+                }
+            } // for x
+        } else { // normal 0/1 split plane
+            for (x=0; x<pDraw->iWidth; x++) {
+                uc <<= 4;
+                uc |= (colorMap[(src & 0xc0) >> 6]) & 0xf;
+                src <<= 2;
+                if ((x & 3) == 3) { // new input byte
+                    src = *s++;
+                    src ^= ucInvert;
+                }
+                if ((x & 1) == 1) { // new output byte
+                    *d++ = uc;
+                    uc = 0;
+                }
+            } // for x
+        }
+    }
+
+    bbep.writeData(pTemp, (pDraw->iWidth + 1) / 2);
+} /* png_draw() */
+
+int png_to_7color_epd(const uint8_t *pPNG, int iDataSize)
+{
+int iPlane, rc = -1;
+PNG *png = new PNG();
+
+    if (!png) return PNG_MEM_ERROR; // not enough memory for the decoder instance
+    rc = png->openRAM((uint8_t *)pPNG, iDataSize, png_draw_into_4bpp);
+    png->close();
+    if (rc == PNG_SUCCESS) {
+        if (png->getWidth() != bbep.width() || png->getHeight() != bbep.height()) {
+            Log_error("PNG image size doesn't match display size");
+            rc = -1;
+        } else if (png->getBpp() > 2) {
+            Log_error("Unsupported PNG bit depth (only 1 or 2-bpp supported)");
+            rc = -1;
+        } else { // okay to decode
+            Log_info("%s [%d]: Decoding %d-bpp png (current)\r\n", __FILE__, __LINE__, png->getBpp());
+            // Prepare target memory window (entire display)
+            bbep.writeCmd(0x10); // DATA_START_TRANSMISSION_1
+            if (png->getBpp() == 1 || png_count_colors(png, pPNG, iDataSize) == 2) { // 1-bit image (single plane)
+                rc = REFRESH_FULL; // this panel doesn't support partial update
+                png->openRAM((uint8_t *)pPNG, iDataSize, png_draw_into_4bpp);
+                if (png->getBpp() == 1) {
+                    png->decode(NULL, 0);
+                } else { // convert the 2-bit image to 1-bit output
+                    Log_info("%s [%d]: Current png only has 2 unique colors!\n", __FILE__, __LINE__);
+                    iPlane = 2;
+                    png->decode(&iPlane, 0);
+                }
+                png->close();
+            } else { // 2-bpp
+                rc = REFRESH_FULL; // this panel doesn't support partial update
+                iUpdateCount = 0; // grayscale mode resets the partial update counter
+                iPlane = 0;
+                Log_info("%s [%d]: decoding 4-gray plane 0\r\n", __FILE__, __LINE__);
+                png->openRAM((uint8_t *)pPNG, iDataSize, png_draw_into_4bpp);
+                png->decode(&iPlane, 0); // tell PNGDraw to use bits for plane 0
+                png->close(); // start over for plane 1
+            }
+        }
+    }
+    free(png); // free the decoder instance
+    return rc;
+} /* png_to_epd() */
+
+/**
+ * @brief Function to build a virtual bitmap, be compatible with the colored ePaper
  * @param image_buffer pointer to the uint8_t image buffer
  * @return true if the image buffer was allocated, false otherwise
  */
-static bool display_render_bitmap(const uint8_t *image_buffer)
+static void draw_virtual_bmp_from_png(const uint8_t *image_buffer)
 {
-    bool bAlloc = false;
-
-#if defined(BOARD_SEEED_RETERMINAL_E1002)
     //currently only reTerminal E1002 is using the 7color ePaper, and it's using ESP32-S3, RAM is not an issue
     const unsigned char bmp_header[62] = {
         // BITMAPFILEHEADER (14 bytes)
@@ -514,19 +640,14 @@ static bool display_render_bitmap(const uint8_t *image_buffer)
         0x00, 0x00, 0x00, 0x00, // Color 0: Black (B,G,R,0)
         0xFF, 0xFF, 0xFF, 0x00  // Color 1: White (B,G,R,0)
     };
-    bbep.allocBuffer(false);
-    bAlloc = true;
     uint8_t *p_buff = (uint8_t *)malloc(DISPLAY_BMP_IMAGE_SIZE);
     memcpy(p_buff, bmp_header, 62);  // fillin a dummy header
     memcpy(p_buff + 62, image_buffer, DISPLAY_BMP_IMAGE_SIZE - 62);
     int ret = bbep.loadBMP(p_buff, 0, 0, BBEP_WHITE, BBEP_BLACK);  //loadBMP will handle bpp for the color ePaper
     Log_verbose_serial("load BMP decoded from PNG, ret: %d", ret);
     free(p_buff);
-#else
-    bbep.setBuffer((uint8_t *)image_buffer);
-#endif
-    return bAlloc;
 }
+#endif
 
 /**
  * @brief Function to show the image on the display
@@ -566,16 +687,17 @@ void display_show_image(uint8_t *image_buffer, int data_size, bool bWait)
     if (isPNG == true && data_size < MAX_IMAGE_SIZE)
     {
         Log_info("Drawing PNG");
+#if defined(BOARD_SEEED_RETERMINAL_E1002)
+        iRefreshMode = png_to_7color_epd(image_buffer, data_size);
+#else
         iRefreshMode = png_to_epd(image_buffer, data_size);
-        //bAlloc = display_render_bitmap(image_buffer);
+#endif
     }
     else // uncompressed BMP or Group5 compressed image
     {
         if (*(uint16_t *)image_buffer == BB_BITMAP_MARKER)
         {
             // G5 compressed image
-            Log_verbose_serial("Show G5 compressed bmp");
-
             BB_BITMAP *pBBB = (BB_BITMAP *)image_buffer;
 #ifdef BB_EPAPER
             bbep.allocBuffer(false);
@@ -594,8 +716,13 @@ void display_show_image(uint8_t *image_buffer, int data_size, bool bWait)
          // This work-around is due to a lack of RAM; the correct method would be to use loadBMP()
             flip_image(image_buffer+62, bbep.width(), bbep.height(), false); // fix bottom-up bitmap images
 #ifdef BB_EPAPER
+#if defined(BOARD_SEEED_RETERMINAL_E1002)
+            bbep.allocBuffer(false);
+            bAlloc = true;
+            draw_virtual_bmp_from_png(image_buffer+62); // uncompressed 1-bpp bitmap
+#else
             bbep.setBuffer(image_buffer+62); // uncompressed 1-bpp bitmap
-            //bAlloc = display_render_bitmap(image_buffer+62); // uncompressed 1-bpp bitmap
+#endif
 #endif
         }
         bbep.writePlane(PLANE_0); // send image data to the EPD
@@ -615,6 +742,10 @@ void display_show_image(uint8_t *image_buffer, int data_size, bool bWait)
         iRefreshMode = REFRESH_FAST;
     }
     if (!bWait) iRefreshMode = REFRESH_PARTIAL; // fast update when showing loading screen
+#if defined(BOARD_SEEED_RETERMINAL_E1002)
+    iRefreshMode = REFRESH_FULL; // the 7-color ePaper needs full refresh
+    bWait = true; // always wait for the EPD refresh to complete
+#endif
     Log_info("%s [%d]: EPD refresh mode: %d\r\n", __FILE__, __LINE__, iRefreshMode);
     bbep.refresh(iRefreshMode, bWait);
     if (bAlloc) {
@@ -676,8 +807,6 @@ void display_show_msg(uint8_t *image_buffer, MSG message_type)
     if (*(uint16_t *)image_buffer == BB_BITMAP_MARKER)
     {
         // G5 compressed image
-        Log_verbose_serial("Show G5 compressed bmp");
-
         BB_BITMAP *pBBB = (BB_BITMAP *)image_buffer;
         int x = (width - pBBB->width)/2;
         int y = (height - pBBB->height)/2; // center it
@@ -853,7 +982,6 @@ void display_show_msg(uint8_t *image_buffer, MSG message_type)
     }
 #ifdef BB_EPAPER
     bbep.writePlane(PLANE_0);
-    Log_info("Display refresh start");
     bbep.refresh(REFRESH_FULL, true);
     bbep.freeBuffer();
 #else
@@ -904,15 +1032,13 @@ void display_show_msg(uint8_t *image_buffer, MSG message_type, String friendly_i
     UWORD Imagesize = ((width % 8 == 0) ? (width / 8) : (width / 8 + 1)) * height;
     BB_RECT rect;
 
-    Log_info("display_show_msg, message_type: %d, friendly_id: %s, id: %d, fw_version: %s, message: %s",
-             message_type, friendly_id.c_str(), id, fw_version, message.c_str());
+    Log_info("Paint_NewImage");
+    Log_info("show image for array");
 
     // Load the image into the bb_epaper framebuffer
     if (*(uint16_t *)image_buffer == BB_BITMAP_MARKER)
     {
         // G5 compressed image
-        Log_verbose_serial("Show G5 compressed bmp");
-
         BB_BITMAP *pBBB = (BB_BITMAP *)image_buffer;
         int x = (width - pBBB->width)/2;
         int y = (height - pBBB->height)/2; // center it
@@ -984,7 +1110,6 @@ void display_show_msg(uint8_t *image_buffer, MSG message_type, String friendly_i
     Log_info("Start drawing...");
 #ifdef BB_EPAPER
     bbep.writePlane(PLANE_0);
-    Log_info("Display refresh start");
     bbep.refresh(REFRESH_FULL, true);
     bbep.freeBuffer();
 #else

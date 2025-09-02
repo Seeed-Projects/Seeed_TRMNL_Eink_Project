@@ -572,23 +572,37 @@ PNG *png = new PNG();
  * The following functions are for E1002 only, temporary implementation for its 4bpp panel
  */
 #if defined(BOARD_SEEED_RETERMINAL_E1002)
-void png_draw_into_4bpp(PNGDRAW *pDraw)
+int png_draw_into_4bpp(PNGDRAW *pDraw)
 {
     int x;
-    uint8_t ucInvert = 0;
-    uint8_t uc, ucMask, src, *s, *d, *pTemp = bbep.getCache(); // get some scratch memory (not from the stack)
+    uint8_t ucBppChanged = 0, ucInvert = 0;
+    uint8_t uc, ucMask, src, *s, *d, *pReduced, *pTemp = bbep.getCache(); // get some scratch memory (not from the stack)
     uint8_t colorMap[4] = {0x01, 0x03, 0x05, 0x0}; // map 4 gray to 4 colors in 4bpp
     //0 black, 1 white, 2 yellow, 3 red, 5 blue, 6 green
 
-    if (pDraw->pPalette) {
-      if (pDraw->pPalette[0] == 0) {
-        ucInvert = 0xff;
-      }
+    if (pDraw->iPixelType == PNG_PIXEL_INDEXED || pDraw->iBpp > 2) {
+        if (pDraw->iBpp == 1) { // 1-bit output, just see which color is brighter
+            uint32_t u32Gray0, u32Gray1;
+            u32Gray0 = pDraw->pPalette[0] + (pDraw->pPalette[1]<<2) + pDraw->pPalette[2];
+            u32Gray1 = pDraw->pPalette[3] + (pDraw->pPalette[4]<<2) + pDraw->pPalette[5];
+          if (u32Gray0 < u32Gray1) {
+            ucInvert = 0xff;
+          }
+        } else {
+            // Reduce the source image to 1-bpp or 2-bpp
+            pReduced = (uint8_t *)calloc(512, sizeof(uint8_t));
+            ReduceBpp(1, pDraw->iPixelType, pDraw->pPalette, pDraw->pPixels, pReduced, pDraw->iWidth, pDraw->iBpp);
+            ReduceBpp(2, pDraw->iPixelType, pDraw->pPalette, pDraw->pPixels, pReduced, pDraw->iWidth, pDraw->iBpp);
+            ucBppChanged = 1;
+        }
+    } else if (pDraw->iBpp == 2) {
+        ucInvert = 0xff; // 2-bit non-palette images need to be inverted colors for 4-gray mode
     }
-    s = (uint8_t *)pDraw->pPixels;
+    s = (ucBppChanged) ? pReduced : (uint8_t *)pDraw->pPixels;
     d = pTemp;
     if (!pDraw->pUser) {
         // 1-bit output, decode the single plane and write it
+        ucInvert = ~ucInvert; // the b/w polarity is reversed compared to 2-bpp mode
         src = *s++;
         src ^= ucInvert;
         uc = 0;
@@ -650,7 +664,9 @@ void png_draw_into_4bpp(PNGDRAW *pDraw)
         }
     }
 
+    if (ucBppChanged) free(pReduced);
     bbep.writeData(pTemp, (pDraw->iWidth + 1) / 2);
+    return 1;
 } /* png_draw() */
 
 int png_to_7color_epd(const uint8_t *pPNG, int iDataSize)
@@ -665,25 +681,24 @@ PNG *png = new PNG();
         if (png->getWidth() != bbep.width() || png->getHeight() != bbep.height()) {
             Log_error("PNG image size doesn't match display size");
             rc = -1;
-        } else if (png->getBpp() > 2) {
-            Log_error("Unsupported PNG bit depth (only 1 or 2-bpp supported)");
-            rc = -1;
         } else { // okay to decode
             Log_info("%s [%d]: Decoding %d-bpp png (current)\r\n", __FILE__, __LINE__, png->getBpp());
             // Prepare target memory window (entire display)
             bbep.writeCmd(0x10); // DATA_START_TRANSMISSION_1
-            if (png->getBpp() == 1 || png_count_colors(png, pPNG, iDataSize) == 2) { // 1-bit image (single plane)
+            if (png->getBpp() == 1 || (png->getBpp() == 2 && png_count_colors(png, pPNG, iDataSize) == 2)) { // 1-bit image (single plane)
                 rc = REFRESH_FULL; // this panel doesn't support partial update
                 png->openRAM((uint8_t *)pPNG, iDataSize, png_draw_into_4bpp);
-                if (png->getBpp() == 1) {
+                if (png->getBpp() == 1 || png->getBpp() > 2) {
                     png->decode(NULL, 0);
                 } else { // convert the 2-bit image to 1-bit output
                     Log_info("%s [%d]: Current png only has 2 unique colors!\n", __FILE__, __LINE__);
                     iPlane = 2;
-                    png->decode(&iPlane, 0);
+                    if (png->decode(&iPlane, 0) != PNG_SUCCESS) {
+                        Log_info("%s [%d]: Error decoding image = %d\n", __FILE__, __LINE__, png->getLastError());
+                    }
                 }
                 png->close();
-            } else { // 2-bpp
+            } else { // >= 2-bpp
                 rc = REFRESH_FULL; // this panel doesn't support partial update
                 iUpdateCount = 0; // grayscale mode resets the partial update counter
                 iPlane = 0;
@@ -732,6 +747,9 @@ static void draw_virtual_bmp_from_png(const uint8_t *image_buffer)
         0xFF, 0xFF, 0xFF, 0x00  // Color 1: White (B,G,R,0)
     };
     uint8_t *p_buff = (uint8_t *)malloc(DISPLAY_BMP_IMAGE_SIZE);
+
+    Log_info("Draw virtual bmp from png...");
+
     memcpy(p_buff, bmp_header, 62);  // fillin a dummy header
     memcpy(p_buff + 62, image_buffer, DISPLAY_BMP_IMAGE_SIZE - 62);
     int ret = bbep.loadBMP(p_buff, 0, 0, BBEP_WHITE, BBEP_BLACK);  //loadBMP will handle bpp for the color ePaper

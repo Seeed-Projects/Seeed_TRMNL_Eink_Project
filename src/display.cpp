@@ -10,8 +10,13 @@
 #include "bb_epaper.h"
 //#define ONE_BIT_PANEL EP426_800x480
 //#define TWO_BIT_PANEL EP426_800x480_4GRAY
+#if defined(BOARD_SEEED_RETERMINAL_E1002)
+#define ONE_BIT_PANEL EP73_SPECTRA_800x480
+#define TWO_BIT_PANEL EP73_SPECTRA_800x480
+#else
 #define ONE_BIT_PANEL EP75_800x480
 #define TWO_BIT_PANEL EP75_800x480_4GRAY_OLD
+#endif
 BBEPAPER bbep(ONE_BIT_PANEL);
 // Counts the number of partial updates to know when to do a full update
 RTC_DATA_ATTR int iUpdateCount = 0;
@@ -562,7 +567,159 @@ PNG *png = new PNG();
     free(png); // free the decoder instance
     return rc;
 } /* png_to_epd() */
-/** 
+
+/**
+ * The following functions are for E1002 only, implementation for its 4bpp Spectra6 panel.
+ * Uses Euclidean RGB nearest-neighbour matching (same approach as the ReTerminal firmware)
+ * instead of the previous grayscale-band mapping, enabling all 6 Spectra colours.
+ * Panel 4bpp codes: 0=Black, 1=White, 2=Yellow, 3=Red, 5=Blue, 6=Green
+ */
+#if defined(BOARD_SEEED_RETERMINAL_E1002)
+int png_draw_into_4bpp(PNGDRAW *pDraw)
+{
+    int x, i, dr, dg, db, dist, best_dist;
+    uint8_t uc = 0, r, g, b, idx, best_code;
+    uint8_t *s = (uint8_t *)pDraw->pPixels;
+    uint8_t *d, *pTemp = bbep.getCache();
+    uint8_t *pal = pDraw->pPalette;
+
+    static const uint8_t spectra_rgb[6][3] = {
+        {0,   0,   0  },  // Black
+        {255, 255, 255},  // White
+        {255, 255, 0  },  // Yellow
+        {255, 0,   0  },  // Red
+        {0,   0,   255},  // Blue
+        {0,   255, 0  },  // Green
+    };
+    static const uint8_t spectra_code[6] = {0, 1, 2, 3, 5, 6};
+
+    d = pTemp;
+    for (x = 0; x < pDraw->iWidth; x++) {
+        // Extract RGB for this pixel
+        if (pDraw->iPixelType == PNG_PIXEL_INDEXED) {
+            switch (pDraw->iBpp) {
+                case 8:  idx = s[x]; break;
+                case 4:  idx = (x & 1) ? (s[x >> 1] & 0xf) : (s[x >> 1] >> 4); break;
+                case 2:  idx = (s[x >> 2] >> (6 - (x & 3) * 2)) & 3; break;
+                default: idx = (s[x >> 3] >> (7 - (x & 7))) & 1; break; // 1-bpp
+            }
+            r = pal[idx * 3]; g = pal[idx * 3 + 1]; b = pal[idx * 3 + 2];
+        } else if (pDraw->iPixelType == PNG_PIXEL_TRUECOLOR_ALPHA) {
+            r = s[x * 4]; g = s[x * 4 + 1]; b = s[x * 4 + 2];
+        } else if (pDraw->iPixelType == PNG_PIXEL_TRUECOLOR) {
+            r = s[x * 3]; g = s[x * 3 + 1]; b = s[x * 3 + 2];
+        } else { // grayscale
+            r = g = b = (pDraw->iBpp == 8) ? s[x] : ((s[x >> 3] >> (7 - (x & 7))) & 1 ? 255 : 0);
+        }
+
+        // Fast path: exact primary match (3 byte compares, no multiply)
+        best_code = 0;
+        for (i = 0; i < 6; i++) {
+            if (r == spectra_rgb[i][0] && g == spectra_rgb[i][1] && b == spectra_rgb[i][2]) {
+                best_code = spectra_code[i];
+                break;
+            }
+        }
+        if (i == 6) {
+            // Nearest Spectra6 colour via Euclidean distance in RGB space
+            best_dist = 0x7fffffff;
+            for (i = 0; i < 6; i++) {
+                dr = (int)r - spectra_rgb[i][0];
+                dg = (int)g - spectra_rgb[i][1];
+                db = (int)b - spectra_rgb[i][2];
+                dist = dr * dr + dg * dg + db * db;
+                if (dist < best_dist) {
+                    best_dist = dist; best_code = spectra_code[i];
+                }
+            }
+        }
+
+        // Pack 4bpp: two pixels per byte, high nibble first
+        if (x & 1) {
+            *d++ = uc | best_code;
+            uc = 0;
+        } else {
+            uc = best_code << 4;
+        }
+    }
+    if (pDraw->iWidth & 1)
+        *d++ = uc; // flush remaining nibble for odd-width images
+
+    bbep.writeData(pTemp, (pDraw->iWidth + 1) / 2);
+    return 1;
+} /* png_draw_into_4bpp() */
+
+int png_to_7color_epd(const uint8_t *pPNG, int iDataSize)
+{
+    int rc = -1;
+    PNG *png = new PNG();
+
+    if (!png) return PNG_MEM_ERROR;
+    rc = png->openRAM((uint8_t *)pPNG, iDataSize, png_draw_into_4bpp);
+    png->close();
+    if (rc == PNG_SUCCESS) {
+        if (png->getWidth() != bbep.width() || png->getHeight() != bbep.height()) {
+            Log_error("PNG image size doesn't match display size");
+            rc = -1;
+        } else {
+            Log_info("%s [%d]: Decoding %d-bpp png\r\n", __FILE__, __LINE__, png->getBpp());
+            bbep.writeCmd(0x10); // DATA_START_TRANSMISSION_1
+            rc = REFRESH_FULL;
+            png->openRAM((uint8_t *)pPNG, iDataSize, png_draw_into_4bpp);
+            png->decode(NULL, 0);
+            png->close();
+        }
+    }
+    free(png);
+    return rc;
+} /* png_to_7color_epd() */
+
+/**
+ * @brief Function to build a virtual bitmap, be compatible with the colored ePaper
+ * @param image_buffer pointer to the uint8_t image buffer
+ * @return true if the image buffer was allocated, false otherwise
+ */
+static void draw_virtual_bmp_from_png(const uint8_t *image_buffer)
+{
+    //currently only reTerminal E1002 is using the 7color ePaper, and it's using ESP32-S3, RAM is not an issue
+    const unsigned char bmp_header[62] = {
+        // BITMAPFILEHEADER (14 bytes)
+        0x42, 0x4D,             // bfType: 'BM'
+        0x4E, 0xBB, 0x00, 0x00, // bfSize: 48062 bytes = 0x0000BB4E
+        0x00, 0x00,             // bfReserved1
+        0x00, 0x00,             // bfReserved2
+        0x3E, 0x00, 0x00, 0x00, // bfOffBits: 62 bytes (header + palette)
+
+        // BITMAPINFOHEADER (40 bytes)
+        0x28, 0x00, 0x00, 0x00, // biSize: 40 bytes
+        0x20, 0x03, 0x00, 0x00, // biWidth: 800 px (0x0320)
+        0x20, 0xFE, 0xFF, 0xFF, // biHeight: -480 (top-down)
+        0x01, 0x00,             // biPlanes: 1
+        0x01, 0x00,             // biBitCount: 1bpp
+        0x00, 0x00, 0x00, 0x00, // biCompression: BI_RGB (no compression)
+        0x80, 0xBB, 0x00, 0x00, // biSizeImage: 48000 bytes (0x0000BB80)
+        0x13, 0x0B, 0x00, 0x00, // biXPelsPerMeter: 2835 (72 DPI)
+        0x13, 0x0B, 0x00, 0x00, // biYPelsPerMeter: 2835 (72 DPI)
+        0x02, 0x00, 0x00, 0x00, // biClrUsed: 2 colors
+        0x00, 0x00, 0x00, 0x00, // biClrImportant: 0
+
+        // Color Table (8 bytes)
+        0x00, 0x00, 0x00, 0x00, // Color 0: Black (B,G,R,0)
+        0xFF, 0xFF, 0xFF, 0x00  // Color 1: White (B,G,R,0)
+    };
+    uint8_t *p_buff = (uint8_t *)malloc(DISPLAY_BMP_IMAGE_SIZE);
+
+    Log_info("Draw virtual bmp from png...");
+
+    memcpy(p_buff, bmp_header, 62);  // fillin a dummy header
+    memcpy(p_buff + 62, image_buffer, DISPLAY_BMP_IMAGE_SIZE - 62);
+    int ret = bbep.loadBMP(p_buff, 0, 0, BBEP_WHITE, BBEP_BLACK);  //loadBMP will handle bpp for the color ePaper
+    Log_verbose_serial("load BMP decoded from PNG, ret: %d", ret);
+    free(p_buff);
+}
+#endif
+
+/**
  * @brief Function to show the image on the display
  * @param image_buffer pointer to the uint8_t image buffer
  * @param reverse shows if the color scheme is reverse
@@ -600,7 +757,11 @@ void display_show_image(uint8_t *image_buffer, int data_size, bool bWait)
     if (isPNG == true && data_size < MAX_IMAGE_SIZE)
     {
         Log_info("Drawing PNG");
+#if defined(BOARD_SEEED_RETERMINAL_E1002)
+        iRefreshMode = png_to_7color_epd(image_buffer, data_size);
+#else
         iRefreshMode = png_to_epd(image_buffer, data_size);
+#endif
     }
     else // uncompressed BMP or Group5 compressed image
     {
@@ -625,7 +786,13 @@ void display_show_image(uint8_t *image_buffer, int data_size, bool bWait)
          // This work-around is due to a lack of RAM; the correct method would be to use loadBMP()
             flip_image(image_buffer+62, bbep.width(), bbep.height(), false); // fix bottom-up bitmap images
 #ifdef BB_EPAPER
+#if defined(BOARD_SEEED_RETERMINAL_E1002)
+            bbep.allocBuffer(false);
+            bAlloc = true;
+            draw_virtual_bmp_from_png(image_buffer+62); // uncompressed 1-bpp bitmap
+#else
             bbep.setBuffer(image_buffer+62); // uncompressed 1-bpp bitmap
+#endif
 #endif
         }
         bbep.writePlane(PLANE_0); // send image data to the EPD
@@ -645,6 +812,10 @@ void display_show_image(uint8_t *image_buffer, int data_size, bool bWait)
         iRefreshMode = REFRESH_FAST;
     }
     if (!bWait) iRefreshMode = REFRESH_PARTIAL; // fast update when showing loading screen
+#if defined(BOARD_SEEED_RETERMINAL_E1002)
+    iRefreshMode = REFRESH_FULL; // the 7-color ePaper needs full refresh
+    bWait = true; // always wait for the EPD refresh to complete
+#endif
     Log_info("%s [%d]: EPD refresh mode: %d\r\n", __FILE__, __LINE__, iRefreshMode);
     bbep.refresh(iRefreshMode, bWait);
     if (bAlloc) {
@@ -908,6 +1079,7 @@ void display_show_msg(uint8_t *image_buffer, MSG message_type, String friendly_i
     Log_info("Free heap after bbep.allocBuffer() - %d", ESP.getMaxAllocHeap());
 #endif
 
+#if !defined(BOARD_SEEED_RETERMINAL_E1002)    //for E1002 the screen refresh takes long, remove this unnecessary refresh
     if (message_type == WIFI_CONNECT)
     {
         Log_info("Display set to white");
@@ -923,6 +1095,7 @@ void display_show_msg(uint8_t *image_buffer, MSG message_type, String friendly_i
 #endif
         display_sleep(1000);
     }
+#endif
 
     auto width = display_width();
     auto height = display_height();

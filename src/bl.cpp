@@ -760,7 +760,6 @@ static https_request_err_e downloadAndShow()
             bmp_res = parseBMPHeader(buffer, image_reverse);
             Log.info("%s [%d]: BMP Parsing result: %d\r\n", __FILE__, __LINE__, bmp_res);
           }
-          Serial.println();
           String error = "";
           uint8_t *imagePointer = buffer;
 //          uint8_t *imagePointer = (decodedPng == nullptr) ? buffer : decodedPng;
@@ -863,6 +862,12 @@ static https_request_err_e downloadAndShow()
           break;
           default:
             break;
+          }
+
+          if (imagePointer != nullptr) 
+          {
+            free(imagePointer);
+            imagePointer = nullptr;
           }
 
           if (isPNG && png_res != PNG_NO_ERR)
@@ -1287,6 +1292,7 @@ https_request_err_e handleApiDisplayResponse(ApiDisplayResponse &apiResponse)
             }
             break;
             }
+
             switch (bmp_proccess_response)
             {
             case BMP_NO_ERR:
@@ -1304,10 +1310,11 @@ https_request_err_e handleApiDisplayResponse(ApiDisplayResponse &apiResponse)
           }
           else
           {
-            free(buffer);
-            buffer = nullptr;
             showMessageWithLogo(MSG_FORMAT_ERROR);
           }
+          free(buffer);
+          buffer = nullptr;
+
         }
         else
         {
@@ -1867,7 +1874,7 @@ static float readBatteryVoltage(void)
   Log.warning("%s [%d]: FAKE_BATTERY_VOLTAGE is defined. Returning 4.2V.\r\n", __FILE__, __LINE__);
   return 4.2f;
 #else
-  #if defined(BOARD_XIAO_EPAPER_DISPLAY) || defined(BOARD_SEEED_RETERMINAL_E1001)
+  #if defined(BOARD_XIAO_EPAPER_DISPLAY) || defined(BOARD_SEEED_RETERMINAL_E1001) || defined(BOARD_SEEED_RETERMINAL_E1002)
     pinMode(PIN_VBAT_SWITCH, OUTPUT);
     digitalWrite(PIN_VBAT_SWITCH, VBAT_SWITCH_LEVEL);
     delay(10); // Wait for the switch to stabilize
@@ -1881,7 +1888,7 @@ static float readBatteryVoltage(void)
     for (uint8_t i = 0; i < 8; i++) {
       adc += analogReadMilliVolts(PIN_BATTERY);
     }
-  #if defined(BOARD_XIAO_EPAPER_DISPLAY) || defined(BOARD_SEEED_RETERMINAL_E1001)
+  #if defined(BOARD_XIAO_EPAPER_DISPLAY) || defined(BOARD_SEEED_RETERMINAL_E1001) || defined(BOARD_SEEED_RETERMINAL_E1002)
     digitalWrite(PIN_VBAT_SWITCH, (VBAT_SWITCH_LEVEL == HIGH ? LOW : HIGH));
   #endif
     sensorValue = (adc / 8) * 2;
@@ -2098,7 +2105,7 @@ static bool checkCurrentFileName(String &newName)
 {
   String currentFilename = preferences.getString(PREFERENCES_FILENAME_KEY, "");
 
-  Log.error("%s [%d]: Current filename: %s\r\n", __FILE__, __LINE__, currentFilename);
+  Log.error("%s [%d]: Current filename: %s\r\n", __FILE__, __LINE__, currentFilename.c_str());
 
   if (currentFilename.equals(newName))
   {

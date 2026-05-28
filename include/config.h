@@ -3,14 +3,14 @@
 
 #define FW_MAJOR_VERSION 1
 #define FW_MINOR_VERSION 6
-#define FW_PATCH_VERSION 7
+#define FW_PATCH_VERSION 8
 
 // Helper macros for stringification
 #define STRINGIFY(x) #x
 #define TOSTRING(x) STRINGIFY(x)
 
 #ifndef FW_VERSION_SUFFIX
-#define FW_VERSION_SUFFIX ""
+#define FW_VERSION_SUFFIX "-6col"
 #endif
 
 // Compile-time firmware version string

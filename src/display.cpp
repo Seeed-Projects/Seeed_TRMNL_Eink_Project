@@ -569,149 +569,110 @@ PNG *png = new PNG();
 } /* png_to_epd() */
 
 /**
- * The following functions are for E1002 only, temporary implementation for its 4bpp panel
+ * The following functions are for E1002 only, implementation for its 4bpp Spectra6 panel.
+ * Uses Euclidean RGB nearest-neighbour matching (same approach as the ReTerminal firmware)
+ * instead of the previous grayscale-band mapping, enabling all 6 Spectra colours.
+ * Panel 4bpp codes: 0=Black, 1=White, 2=Yellow, 3=Red, 5=Blue, 6=Green
  */
 #if defined(BOARD_SEEED_RETERMINAL_E1002)
 int png_draw_into_4bpp(PNGDRAW *pDraw)
 {
-    int x;
-    uint8_t ucBppChanged = 0, ucInvert = 0;
-    uint8_t uc, ucMask, src, *s, *d, *pReduced, *pTemp = bbep.getCache(); // get some scratch memory (not from the stack)
-    uint8_t colorMap[4] = {0x01, 0x03, 0x05, 0x0}; // map 4 gray to 4 colors in 4bpp
-    //0 black, 1 white, 2 yellow, 3 red, 5 blue, 6 green
+    int x, i, dr, dg, db, dist, best_dist;
+    uint8_t uc = 0, r, g, b, idx, best_code;
+    uint8_t *s = (uint8_t *)pDraw->pPixels;
+    uint8_t *d, *pTemp = bbep.getCache();
+    uint8_t *pal = pDraw->pPalette;
 
-    if (pDraw->iPixelType == PNG_PIXEL_INDEXED || pDraw->iBpp > 2) {
-        if (pDraw->iBpp == 1) { // 1-bit output, just see which color is brighter
-            uint32_t u32Gray0, u32Gray1;
-            u32Gray0 = pDraw->pPalette[0] + (pDraw->pPalette[1]<<2) + pDraw->pPalette[2];
-            u32Gray1 = pDraw->pPalette[3] + (pDraw->pPalette[4]<<2) + pDraw->pPalette[5];
-          if (u32Gray0 < u32Gray1) {
-            ucInvert = 0xff;
-          }
-        } else {
-            // Reduce the source image to 1-bpp or 2-bpp
-            pReduced = (uint8_t *)calloc(512, sizeof(uint8_t));
-            ReduceBpp(1, pDraw->iPixelType, pDraw->pPalette, pDraw->pPixels, pReduced, pDraw->iWidth, pDraw->iBpp);
-            ReduceBpp(2, pDraw->iPixelType, pDraw->pPalette, pDraw->pPixels, pReduced, pDraw->iWidth, pDraw->iBpp);
-            ucBppChanged = 1;
-        }
-    } else if (pDraw->iBpp == 2) {
-        ucInvert = 0xff; // 2-bit non-palette images need to be inverted colors for 4-gray mode
-    }
-    s = (ucBppChanged) ? pReduced : (uint8_t *)pDraw->pPixels;
+    static const uint8_t spectra_rgb[6][3] = {
+        {0,   0,   0  },  // Black
+        {255, 255, 255},  // White
+        {255, 255, 0  },  // Yellow
+        {255, 0,   0  },  // Red
+        {0,   0,   255},  // Blue
+        {0,   255, 0  },  // Green
+    };
+    static const uint8_t spectra_code[6] = {0, 1, 2, 3, 5, 6};
+
     d = pTemp;
-    if (!pDraw->pUser) {
-        // 1-bit output, decode the single plane and write it
-        ucInvert = ~ucInvert; // the b/w polarity is reversed compared to 2-bpp mode
-        src = *s++;
-        src ^= ucInvert;
-        uc = 0;
-        for(x = 0; x < pDraw->iWidth; x++) {
-            uc <<= 4;
-            if (src & 0x80) {
-                uc |= 0x0;  // black
-            } else {
-                uc |= 0x1;  // white
+    for (x = 0; x < pDraw->iWidth; x++) {
+        // Extract RGB for this pixel
+        if (pDraw->iPixelType == PNG_PIXEL_INDEXED) {
+            switch (pDraw->iBpp) {
+                case 8:  idx = s[x]; break;
+                case 4:  idx = (x & 1) ? (s[x >> 1] & 0xf) : (s[x >> 1] >> 4); break;
+                case 2:  idx = (s[x >> 2] >> (6 - (x & 3) * 2)) & 3; break;
+                default: idx = (s[x >> 3] >> (7 - (x & 7))) & 1; break; // 1-bpp
             }
-            src <<= 1;
-            if ((x & 7) == 7) {
-                src = *s++; 
-                src ^= ucInvert;
-            }
-            if ((x & 1) == 1) {
-                *d++ = uc;
-                uc = 0;
+            r = pal[idx * 3]; g = pal[idx * 3 + 1]; b = pal[idx * 3 + 2];
+        } else if (pDraw->iPixelType == PNG_PIXEL_TRUECOLOR_ALPHA) {
+            r = s[x * 4]; g = s[x * 4 + 1]; b = s[x * 4 + 2];
+        } else if (pDraw->iPixelType == PNG_PIXEL_TRUECOLOR) {
+            r = s[x * 3]; g = s[x * 3 + 1]; b = s[x * 3 + 2];
+        } else { // grayscale
+            r = g = b = (pDraw->iBpp == 8) ? s[x] : ((s[x >> 3] >> (7 - (x & 7))) & 1 ? 255 : 0);
+        }
+
+        // Fast path: exact primary match (3 byte compares, no multiply)
+        best_code = 0;
+        for (i = 0; i < 6; i++) {
+            if (r == spectra_rgb[i][0] && g == spectra_rgb[i][1] && b == spectra_rgb[i][2]) {
+                best_code = spectra_code[i];
+                break;
             }
         }
-    } else { // we need to split the 2-bit data into plane 0 and 1
-        src = *s++;
-        src ^= ucInvert;
-        uc = 0; // suppress warning/error
-        if (*(int *)pDraw->pUser > 1) { // draw 2bpp data as 1-bit to use for partial update
-            ucInvert = ~ucInvert; // the invert rule is backwards for grayscale data
-            src = ~src;
-            for (x=0; x<pDraw->iWidth; x++) {
-                uc <<= 4;
-                if (src & 0xc0) { // non-white -> black
-                    uc |= 0x0;
-                } else {
-                    uc |= 0x1; // white
+        if (i == 6) {
+            // Nearest Spectra6 colour via Euclidean distance in RGB space
+            best_dist = 0x7fffffff;
+            for (i = 0; i < 6; i++) {
+                dr = (int)r - spectra_rgb[i][0];
+                dg = (int)g - spectra_rgb[i][1];
+                db = (int)b - spectra_rgb[i][2];
+                dist = dr * dr + dg * dg + db * db;
+                if (dist < best_dist) {
+                    best_dist = dist; best_code = spectra_code[i];
                 }
-                src <<= 2;
-                if ((x & 3) == 3) { // new input byte
-                    src = *s++;
-                    src ^= ucInvert;
-                }
-                if ((x & 1) == 1) { // new output byte
-                    *d++ = uc;
-                    uc = 0;
-                }
-            } // for x
-        } else { // normal 0/1 split plane
-            for (x=0; x<pDraw->iWidth; x++) {
-                uc <<= 4;
-                uc |= (colorMap[(src & 0xc0) >> 6]) & 0xf;
-                src <<= 2;
-                if ((x & 3) == 3) { // new input byte
-                    src = *s++;
-                    src ^= ucInvert;
-                }
-                if ((x & 1) == 1) { // new output byte
-                    *d++ = uc;
-                    uc = 0;
-                }
-            } // for x
+            }
+        }
+
+        // Pack 4bpp: two pixels per byte, high nibble first
+        if (x & 1) {
+            *d++ = uc | best_code;
+            uc = 0;
+        } else {
+            uc = best_code << 4;
         }
     }
+    if (pDraw->iWidth & 1)
+        *d++ = uc; // flush remaining nibble for odd-width images
 
-    if (ucBppChanged) free(pReduced);
     bbep.writeData(pTemp, (pDraw->iWidth + 1) / 2);
     return 1;
-} /* png_draw() */
+} /* png_draw_into_4bpp() */
 
 int png_to_7color_epd(const uint8_t *pPNG, int iDataSize)
 {
-int iPlane, rc = -1;
-PNG *png = new PNG();
+    int rc = -1;
+    PNG *png = new PNG();
 
-    if (!png) return PNG_MEM_ERROR; // not enough memory for the decoder instance
+    if (!png) return PNG_MEM_ERROR;
     rc = png->openRAM((uint8_t *)pPNG, iDataSize, png_draw_into_4bpp);
     png->close();
     if (rc == PNG_SUCCESS) {
         if (png->getWidth() != bbep.width() || png->getHeight() != bbep.height()) {
             Log_error("PNG image size doesn't match display size");
             rc = -1;
-        } else { // okay to decode
-            Log_info("%s [%d]: Decoding %d-bpp png (current)\r\n", __FILE__, __LINE__, png->getBpp());
-            // Prepare target memory window (entire display)
+        } else {
+            Log_info("%s [%d]: Decoding %d-bpp png\r\n", __FILE__, __LINE__, png->getBpp());
             bbep.writeCmd(0x10); // DATA_START_TRANSMISSION_1
-            if (png->getBpp() == 1 || (png->getBpp() == 2 && png_count_colors(png, pPNG, iDataSize) == 2)) { // 1-bit image (single plane)
-                rc = REFRESH_FULL; // this panel doesn't support partial update
-                png->openRAM((uint8_t *)pPNG, iDataSize, png_draw_into_4bpp);
-                if (png->getBpp() == 1 || png->getBpp() > 2) {
-                    png->decode(NULL, 0);
-                } else { // convert the 2-bit image to 1-bit output
-                    Log_info("%s [%d]: Current png only has 2 unique colors!\n", __FILE__, __LINE__);
-                    iPlane = 2;
-                    if (png->decode(&iPlane, 0) != PNG_SUCCESS) {
-                        Log_info("%s [%d]: Error decoding image = %d\n", __FILE__, __LINE__, png->getLastError());
-                    }
-                }
-                png->close();
-            } else { // >= 2-bpp
-                rc = REFRESH_FULL; // this panel doesn't support partial update
-                iUpdateCount = 0; // grayscale mode resets the partial update counter
-                iPlane = 0;
-                Log_info("%s [%d]: decoding 4-gray plane 0\r\n", __FILE__, __LINE__);
-                png->openRAM((uint8_t *)pPNG, iDataSize, png_draw_into_4bpp);
-                png->decode(&iPlane, 0); // tell PNGDraw to use bits for plane 0
-                png->close(); // start over for plane 1
-            }
+            rc = REFRESH_FULL;
+            png->openRAM((uint8_t *)pPNG, iDataSize, png_draw_into_4bpp);
+            png->decode(NULL, 0);
+            png->close();
         }
     }
-    free(png); // free the decoder instance
+    free(png);
     return rc;
-} /* png_to_epd() */
+} /* png_to_7color_epd() */
 
 /**
  * @brief Function to build a virtual bitmap, be compatible with the colored ePaper

@@ -21,6 +21,14 @@ struct ApiSetupResponse
   String message;
 };
 
+struct ApiSetupInputs
+{
+  String baseUrl;
+  String macAddress;
+  String firmwareVersion;
+  String model;
+};
+
 enum class ApiDisplayOutcome
 {
   Ok,
@@ -39,9 +47,11 @@ struct ApiDisplayResponse
   bool maximum_compatibility;
   String firmware_url;
   uint64_t refresh_rate;
+  uint32_t temp_profile;
   bool reset_firmware;
   SPECIAL_FUNCTION special_function;
   String action;
+  String touchbar_mode;
 };
 
 struct ApiDisplayInputs
@@ -49,15 +59,36 @@ struct ApiDisplayInputs
   String baseUrl;
   String apiKey;
   String friendlyId;
+  String updateSource;
   uint32_t refreshRate;
   String macAddress;
   float batteryVoltage;
+#ifdef BOARD_TRMNL_X
+  int batteryCount;
+  int batteryCharging;
+  int batteryCurrent;
+  int currentBatteryCapacity;
+  int maxBatteryCapacity;
+  float batteryTemperature;
+  int stateOfCharge;
+  int stateOfHealth;
+#endif
   String firmwareVersion;
   String model;
   int rssi;
+  String wifiBand;
   int displayWidth;
   int displayHeight;
   SPECIAL_FUNCTION specialFunction;
+  bool usbConnected;
+  bool imageCached;
+  int prevWakeTime;
+};
+
+struct ApiLogInputs
+{
+  String macAddress;
+  String apiKey;
 };
 
 typedef struct

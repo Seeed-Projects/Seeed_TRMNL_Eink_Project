@@ -1,10 +1,10 @@
 #include "WebServer.h"
 #include <WiFi.h>
 #include <test.h>
+#include <trmnl_log.h>
+#include <Preferences.h> 
 
-
-
-void setUpWebserver(AsyncWebServer &server, const IPAddress &localIP, WifiOperationCallbacks callbacks)
+void setUpWebserver(AsyncWebServer &server, const IPAddress &localIP, WifiOperationCallbacks callbacks, const String& modemMac)
 {
     //======================== Webserver ========================
     // WARNING IOS (and maybe macos) WILL NOT POP UP IF IT CONTAINS THE WORD "Success" https://www.esp8266.com/viewtopic.php?f=34&t=4398
@@ -67,75 +67,127 @@ void setUpWebserver(AsyncWebServer &server, const IPAddress &localIP, WifiOperat
     server.on("/run-test", HTTP_GET, [](AsyncWebServerRequest *request)
               {
                 Serial.println("Running sensor test from web...");
-                String json = Main_Test();
+                String json = testTemperature();
                 request->send(200, "application/json", json);
               });
 
-    auto scanGET = server.on("/scan", HTTP_GET, [callbacks](AsyncWebServerRequest *request)
+    auto scanGET = server.on("/scan", HTTP_GET, [callbacks, modemMac](AsyncWebServerRequest *request)
                              {
 		String json = "{\"networks\":[";
-		int n = WiFi.scanComplete();
-		if (n == WIFI_SCAN_FAILED) {
-			WiFi.scanNetworks(true);
-			return request->send(202);
-		} else if(n == WIFI_SCAN_RUNNING){
-			return request->send(202);
-		} else {
-			// Data structure to store the highest RSSI for each SSID
-            // Warning: DO NOT USE true on this function in an async context!
-            std::vector<Network> combinedNetworks = callbacks.getAnnotatedNetworks(false);
 
-            // Generate JSON response
-            size_t size = 0;
-            for (const auto &network : combinedNetworks)
-            {
-                String ssid = network.ssid;
-				String rssi = String(network.rssi);
-
-				// Escape invalid characters
-				ssid.replace("\\","\\\\");
-				ssid.replace("\"","\\\"");
-				json+= "{";
-				json+= "\"name\":\""+ssid+"\",";
-				json+= "\"rssi\":\""+rssi+"\",";
-				json+= "\"open\":"+String(network.open == WIFI_AUTH_OPEN ? "true,": "false,");
-                json+= "\"saved\":"+String(network.saved ? "true": "false");
-				json+= "}";
-
-				size += 1;
-
-				if (size != combinedNetworks.size())
-				{
-					json+= ",";
-				}
-            }
-
-            WiFi.scanDelete();
-			Serial.println(json);
-
-			if (WiFi.scanComplete() == -2){
+		if (!callbacks.isNetworkListReady()) {
+			if (WiFi.scanComplete() == WIFI_SCAN_FAILED) {
 				WiFi.scanNetworks(true);
 			}
+			return request->send(202);
 		}
+
+		// Data structure to store the highest RSSI for each SSID
+		// Warning: DO NOT USE true on getAnnotatedNetworks in an async context!
+		std::vector<WifiNetwork> combinedNetworks = callbacks.getAnnotatedNetworks(false);
+
+		// Generate JSON response
+		size_t size = 0;
+		for (const auto &network : combinedNetworks)
+		{
+			String ssid = network.ssid;
+			String rssi = String(network.rssi);
+
+			// Escape invalid characters
+			ssid.replace("\\","\\\\");
+			ssid.replace("\"","\\\"");
+			json+= "{";
+			json+= "\"name\":\""+ssid+"\",";
+			json+= "\"rssi\":\""+rssi+"\",";
+			json+= "\"open\":"+String(network.open == WIFI_AUTH_OPEN ? "true,": "false,");
+			json+= "\"saved\":"+String(network.saved ? "true,": "false,"  );
+			json+= "\"band\":\""+String(network.is5GHz ? "5GHz" : "2.4GHz")+"\",";
+			json+= "\"enterprise\":"+String(network.enterprise ? "true": "false");
+			json+= "}";
+
+			size += 1;
+
+			if (size != combinedNetworks.size())
+			{
+				json+= ",";
+			}
+		}
+
+		WiFi.scanDelete();
+		Serial.println(json);
+
+		if (WiFi.scanComplete() == -2){
+#ifdef CONFIG_IDF_TARGET_ESP32C5
+            WiFi.setBandMode(WIFI_BAND_MODE_AUTO);
+#endif
+			WiFi.scanNetworks(true);
+		}
+
 		json += "],";
 
         // Expose MAC pre-connect for easier setup debugging
         String mac = WiFi.macAddress();
         json+= "\"mac\":\""+mac+"\"";
-
+#ifdef BOARD_TRMNL_X
+        if (!modemMac.isEmpty()) {
+            json+= ",\"mac_5ghz\":\""+modemMac+"\"";
+        }
+#endif
         json += "}";
         request->send(200, "application/json", json);
 		json = String(); });
 
-    AsyncCallbackJsonWebHandler *handler = new AsyncCallbackJsonWebHandler("/connect", [callbacks](AsyncWebServerRequest *request, JsonVariant &json)
+    AsyncCallbackJsonWebHandler *handler = new AsyncCallbackJsonWebHandler("/connect", [callbacks, modemMac](AsyncWebServerRequest *request, JsonVariant &json)
                                                                            {
 		JsonObject data = json.as<JsonObject>();
 		String ssid = data["ssid"];
 		String pswd = data["pswd"];
         String api_server = data["server"];
-        callbacks.setConnectionCredentials({ssid, pswd}, api_server);
+        bool isEnterprise = data["isEnterprise"].is<bool>() && data["isEnterprise"].as<bool>();
+        String username = data["username"].is<String>() ? data["username"].as<String>() : "";
+        String identity = data["identity"].is<String>() ? data["identity"].as<String>() : "";
+
+        // Static IP fields (optional)
+        bool useStaticIP = data["useStaticIP"].is<bool>() && data["useStaticIP"].as<bool>();
+        String staticIP = data["staticIP"].is<String>() ? data["staticIP"].as<String>() : "";
+        String gateway = data["gateway"].is<String>() ? data["gateway"].as<String>() : "";
+        String subnet = data["subnet"].is<String>() ? data["subnet"].as<String>() : "";
+        String dns1 = data["dns1"].is<String>() ? data["dns1"].as<String>() : "";
+        String dns2 = data["dns2"].is<String>() ? data["dns2"].as<String>() : "";
+        WifiCredentials credentials;
+        credentials.ssid = ssid;
+        credentials.pswd = pswd;
+        credentials.isEnterprise = isEnterprise;
+        credentials.username = username;
+        credentials.identity = identity;
+        // Static IP settings
+        credentials.useStaticIP = useStaticIP;
+        credentials.staticIP = staticIP;
+        credentials.gateway = gateway;
+        credentials.subnet = subnet;
+        credentials.dns1 = dns1;
+        credentials.dns2 = dns2;
+
+        String ntpServer = data["ntpServer1"].is<String>() ? data["ntpServer1"].as<String>() : "";
+        if (ntpServer.length() > 0) {
+            Preferences prefs;
+            prefs.begin("data", false);
+            prefs.putString("ntp_server", ntpServer);
+            prefs.end();
+            Log_info("WebServer: Saved NTP server: %s", ntpServer.c_str());
+        }
+
+        Log_info("WebServer: Received SSID: %s, Static IP: %s", ssid.c_str(), useStaticIP ? "yes" : "no");
+
+        callbacks.setConnectionCredentials(credentials, api_server);
         String mac = WiFi.macAddress();
-        String message = "{\"ssid\":\"" + ssid + "\",\"mac\":\"" + mac + "\"}";
+        String message = "{\"ssid\":\"" + ssid + "\",\"mac\":\"" + mac + "\"";
+#ifdef BOARD_TRMNL_X
+        if (!modemMac.isEmpty()) {
+            message += ",\"mac_5ghz\":\"" + modemMac + "\"";
+        }
+#endif
+        message += "}";
         request->send(200, "application/json", message); });
 
     server.addHandler(handler);
